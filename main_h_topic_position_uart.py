@@ -54,9 +54,20 @@ UART_TX_GPIO = 11
 UART_RX_GPIO = 12
 UART_BAUDRATE = 115200
 
-# Optional display-space filter. Set to (x, y, w, h) if background reflections
-# cause false detections outside the rod area.
+# Display-space filter. None means full-width, center-third-height ROI.
+# Set to (x, y, w, h) to override after final mounting.
 PIPE_ROI = None
+
+
+def make_active_roi(display_size):
+    if PIPE_ROI is not None:
+        return PIPE_ROI
+
+    width = int(display_size[0])
+    height = int(display_size[1])
+    roi_h = height // 3
+    roi_y = (height - roi_h) // 2
+    return (0, roi_y, width, roi_h)
 
 
 def make_calibration(zero_px, minus_px, plus_px, half_range_cm):
@@ -108,7 +119,7 @@ def select_model_path():
     )
 
 
-def get_best_detection(result):
+def get_best_detection(result, roi):
     count = 0
     best_score = -1.0
     best_center = None
@@ -119,7 +130,7 @@ def get_best_detection(result):
             x, y, width, height = result[0][index]
             center_x = int(round(x + width / 2))
             center_y = int(round(y + height / 2))
-            if not point_in_roi(center_x, center_y, PIPE_ROI):
+            if not point_in_roi(center_x, center_y, roi):
                 continue
             score = float(result[2][index])
             if score > best_score:
@@ -177,11 +188,15 @@ def send_position(uart, found, pos_cm, target_cm, score, status):
     return line
 
 
-def draw_overlay(osd_image, center, pos_cm, target_cm, score, status, calibration):
+def draw_overlay(osd_image, center, pos_cm, target_cm, score, status, calibration, roi):
     minus_px = pixel_from_cm(-HALF_RANGE_CM, calibration)
     zero_px = pixel_from_cm(0.0, calibration)
     plus_px = pixel_from_cm(HALF_RANGE_CM, calibration)
     target_px = pixel_from_cm(target_cm, calibration)
+
+    if roi is not None:
+        roi_x, roi_y, roi_w, roi_h = roi
+        osd_image.draw_rectangle(roi_x, roi_y, roi_w, roi_h, color=(0, 160, 255), thickness=2)
 
     osd_image.draw_line(
         minus_px[0], minus_px[1], plus_px[0], plus_px[1], color=(0, 220, 255), thickness=2
@@ -209,6 +224,7 @@ def draw_overlay(osd_image, center, pos_cm, target_cm, score, status, calibratio
 
 def run_self_test():
     calibration = make_calibration((320, 180), (80, 180), (560, 180), 12.0)
+    assert make_active_roi((640, 360)) == (0, 120, 640, 120)
     assert cm_to_x10(project_position_cm((320, 180), calibration)) == 0
     assert cm_to_x10(project_position_cm((420, 180), calibration)) == 50
     assert cm_to_x10(project_position_cm((220, 180), calibration)) == -50
@@ -244,6 +260,7 @@ def main():
             vflip=V_FLIP,
         )
         display_size = pipeline.get_display_size()
+        active_roi = make_active_roi(display_size)
 
         detector = YOLOv8(
             task_type="detect",
@@ -270,7 +287,7 @@ def main():
                 now_ms = time.ticks_ms()
                 frame = pipeline.get_frame()
                 result = detector.run(frame)
-                count, center, score = get_best_detection(result)
+                count, center, score = get_best_detection(result, active_roi)
 
                 status = "LOST"
                 if center is not None:
@@ -287,7 +304,7 @@ def main():
                 pos_cm = project_position_cm(center, calibration) if found else 0.0
 
                 detector.draw_result(result, pipeline.osd_img)
-                draw_overlay(pipeline.osd_img, center, pos_cm, TARGET_CM, score, status, calibration)
+                draw_overlay(pipeline.osd_img, center, pos_cm, TARGET_CM, score, status, calibration, active_roi)
                 pipeline.show_image()
 
                 line = send_position(uart, found, pos_cm, TARGET_CM, score, status)
