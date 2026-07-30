@@ -9,6 +9,10 @@ UART line format:
 
 Example:
   BALL,1,48,50,2,82,BALL
+
+Touch calibration:
+  Put the ball at 0cm, -5cm, +5cm and tap CAPTURE each time.
+  Saved file: /sdcard/steel_ball/h_position_calib.txt
 """
 
 import gc
@@ -74,6 +78,8 @@ WBC_HEIGHT = 360
 VLC_NETWORK_CACHING_MS = 500
 BOOT_LOG_PATH = "/sdcard/steel_ball/main_h_position_rtsp_ap_boot.log"
 SCRIPT_VERSION = "main_h_position_rtsp_ap_v1"
+CALIB_FILE_PATH = "/sdcard/steel_ball/h_position_calib.txt"
+CALIB_STEPS = ("0cm", "-5cm", "+5cm")
 
 # Display-space filter. None means full-width, center-third-height ROI.
 # Set to (x, y, w, h) to override after final mounting.
@@ -142,6 +148,123 @@ def start_rtsp(ip):
     WBCRtsp.start()
     log("[h_position_rtsp] rtsp started")
     return rtsp_url
+
+
+def init_touch():
+    try:
+        from machine import TOUCH
+
+        touch = TOUCH(0)
+        log("[h_position_rtsp] touch ready")
+        return touch
+    except BaseException as error:
+        log("[h_position_rtsp] touch disabled:", error)
+        return None
+
+
+def read_touch_point(touch):
+    if touch is None:
+        return None
+    try:
+        points = touch.read()
+        if points and len(points) > 0:
+            return (int(points[0].x), int(points[0].y))
+    except BaseException:
+        pass
+    return None
+
+
+def parse_calibration_text(text):
+    parts = text.strip().replace(",", " ").split()
+    if len(parts) != 7:
+        raise ValueError("bad calibration file")
+    values = [float(part) for part in parts]
+    return (
+        (values[0], values[1]),
+        (values[2], values[3]),
+        (values[4], values[5]),
+        values[6],
+    )
+
+
+def format_calibration_text(zero_px, minus_px, plus_px, half_range_cm):
+    return "%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f\n" % (
+        zero_px[0],
+        zero_px[1],
+        minus_px[0],
+        minus_px[1],
+        plus_px[0],
+        plus_px[1],
+        half_range_cm,
+    )
+
+
+def default_calibration_points():
+    return ZERO_PX, MINUS_5CM_PX, PLUS_5CM_PX, HALF_RANGE_CM
+
+
+def load_calibration_points():
+    try:
+        with open(CALIB_FILE_PATH, "r") as calib_file:
+            points = parse_calibration_text(calib_file.read())
+        make_calibration(points[0], points[1], points[2], points[3])
+        log("[h_position_rtsp] calibration loaded:", CALIB_FILE_PATH)
+        return points
+    except OSError:
+        log("[h_position_rtsp] calibration default")
+    except BaseException as error:
+        log("[h_position_rtsp] calibration ignored:", error)
+    return default_calibration_points()
+
+
+def save_calibration_points(zero_px, minus_px, plus_px, half_range_cm):
+    text = format_calibration_text(zero_px, minus_px, plus_px, half_range_cm)
+    with open(CALIB_FILE_PATH, "w") as calib_file:
+        calib_file.write(text)
+    return text
+
+
+def in_rect(px, py, rect):
+    x, y, width, height = rect
+    return x <= px <= x + width and y <= py <= y + height
+
+
+def cal_button(display_size):
+    width, height = int(display_size[0]), int(display_size[1])
+    return (width - 92, height - 48, 84, 40)
+
+
+def cancel_button(display_size):
+    height = int(display_size[1])
+    return (8, height - 50, 128, 42)
+
+
+def capture_button(display_size):
+    width, height = int(display_size[0]), int(display_size[1])
+    return (width - 150, height - 50, 142, 42)
+
+
+def draw_button(osd_image, rect, label, color):
+    x, y, width, height = rect
+    osd_image.draw_rectangle(x, y, width, height, color=color, fill=True)
+    osd_image.draw_rectangle(x, y, width, height, color=(255, 255, 255), thickness=2)
+    osd_image.draw_string_advanced(x + 10, y + 10, 18, label, color=(255, 255, 255))
+
+
+def draw_touch_ui(osd_image, display_size, touch_enabled, calib_mode, calib_step, message):
+    width, height = int(display_size[0]), int(display_size[1])
+    if not calib_mode:
+        draw_button(osd_image, cal_button(display_size), "CAL", (0, 80, 190) if touch_enabled else (80, 80, 80))
+        if message:
+            osd_image.draw_string_advanced(5, height - 72, 18, message, color=(255, 255, 0))
+        return
+
+    osd_image.draw_rectangle(0, height - 64, width, 64, color=(22, 24, 34), fill=True)
+    osd_image.draw_line(0, height - 64, width, height - 64, color=(90, 90, 135), thickness=2)
+    draw_button(osd_image, cancel_button(display_size), "CANCEL", (120, 40, 40))
+    draw_button(osd_image, capture_button(display_size), "CAPTURE", (0, 120, 80))
+    osd_image.draw_string_advanced(150, height - 52, 18, "STEP %d/3: %s" % (calib_step + 1, CALIB_STEPS[calib_step]), color=(255, 255, 255))
+    osd_image.draw_string_advanced(150, height - 28, 16, message, color=(255, 255, 0))
 
 
 def make_active_roi(display_size):
@@ -291,7 +414,7 @@ def draw_overlay(osd_image, center, pos_cm, target_cm, score, status, calibratio
     osd_image.draw_string_advanced(5, 5, 22, "H ball pos", color=(0, 255, 0))
 
     if center is None:
-        osd_image.draw_string_advanced(5, 34, 20, "status: LOST", color=(255, 80, 80))
+        osd_image.draw_string_advanced(5, 34, 20, "status: %s" % status, color=(255, 80, 80))
         return
 
     err_cm = target_cm - pos_cm
@@ -310,6 +433,14 @@ def draw_overlay(osd_image, center, pos_cm, target_cm, score, status, calibratio
 def run_self_test():
     calibration = make_calibration((320, 180), (80, 180), (560, 180), 12.0)
     assert make_active_roi((640, 360)) == (0, 120, 640, 120)
+    text = format_calibration_text((320, 180), (220, 180), (420, 180), 5.0)
+    zero_px, minus_px, plus_px, half_range_cm = parse_calibration_text(text)
+    calibration_5cm = make_calibration(zero_px, minus_px, plus_px, half_range_cm)
+    assert cm_to_x10(project_position_cm(zero_px, calibration_5cm)) == 0
+    assert cm_to_x10(project_position_cm(minus_px, calibration_5cm)) == -50
+    assert cm_to_x10(project_position_cm(plus_px, calibration_5cm)) == 50
+    assert in_rect(10, 10, (0, 0, 20, 20))
+    assert not in_rect(30, 10, (0, 0, 20, 20))
     assert cm_to_x10(project_position_cm((320, 180), calibration)) == 0
     assert cm_to_x10(project_position_cm((420, 180), calibration)) == 50
     assert cm_to_x10(project_position_cm((220, 180), calibration)) == -50
@@ -328,12 +459,14 @@ def main():
     pipeline = None
     detector = None
     uart = None
+    touch = None
     ap = None
     rtsp_started = False
     rtsp_url = None
     net_status = "AP: waiting"
     last_client_status = 0
-    calibration = make_calibration(ZERO_PX, MINUS_5CM_PX, PLUS_5CM_PX, HALF_RANGE_CM)
+    zero_px, minus_px, plus_px, half_range_cm = load_calibration_points()
+    calibration = make_calibration(zero_px, minus_px, plus_px, half_range_cm)
 
     try:
         log("[h_position_rtsp] boot:", SCRIPT_VERSION)
@@ -369,6 +502,7 @@ def main():
             debug_mode=0,
         )
         detector.config_preprocess()
+        touch = init_touch()
 
         try:
             ap, ip = start_ap()
@@ -387,6 +521,11 @@ def main():
         last_center = None
         last_score = 0.0
         last_seen_ms = time.ticks_ms()
+        touch_was_pressed = False
+        calib_mode = False
+        calib_step = 0
+        captured_points = []
+        calib_msg = "tap CAL to calibrate"
 
         while True:
             with ScopedTiming("total", 1):
@@ -402,24 +541,77 @@ def main():
                 frame = pipeline.get_frame()
                 result = detector.run(frame)
                 count, center, score = get_best_detection(result, active_roi)
+                detected_center = center
+                detected_score = score
+
+                touch_point = read_touch_point(touch)
+                touch_event = touch_point if touch_point is not None and not touch_was_pressed else None
+                touch_was_pressed = touch_point is not None
+
+                if touch_event is not None:
+                    touch_x, touch_y = touch_event
+                    if calib_mode:
+                        if in_rect(touch_x, touch_y, cancel_button(display_size)):
+                            calib_mode = False
+                            captured_points = []
+                            calib_step = 0
+                            calib_msg = "calibration canceled"
+                            log("[h_position_rtsp] calibration canceled")
+                        elif in_rect(touch_x, touch_y, capture_button(display_size)):
+                            if detected_center is None:
+                                calib_msg = "no fresh ball"
+                            else:
+                                captured_points.append(detected_center)
+                                log("[h_position_rtsp] calib %s: %d,%d" % (CALIB_STEPS[calib_step], detected_center[0], detected_center[1]))
+                                if calib_step < 2:
+                                    calib_step += 1
+                                    calib_msg = "put ball at %s" % CALIB_STEPS[calib_step]
+                                else:
+                                    try:
+                                        zero_px = captured_points[0]
+                                        minus_px = captured_points[1]
+                                        plus_px = captured_points[2]
+                                        calibration = make_calibration(zero_px, minus_px, plus_px, HALF_RANGE_CM)
+                                        save_calibration_points(zero_px, minus_px, plus_px, HALF_RANGE_CM)
+                                        calib_msg = "calibration saved"
+                                        log("[h_position_rtsp] calibration saved")
+                                    except BaseException as calib_error:
+                                        calib_msg = "calibration save failed"
+                                        log("[h_position_rtsp] calibration save error:", calib_error)
+                                    calib_mode = False
+                                    captured_points = []
+                                    calib_step = 0
+                    elif in_rect(touch_x, touch_y, cal_button(display_size)):
+                        calib_mode = True
+                        captured_points = []
+                        calib_step = 0
+                        calib_msg = "put ball at %s" % CALIB_STEPS[calib_step]
+                        log("[h_position_rtsp] calibration start")
 
                 status = "LOST"
-                if center is not None:
-                    last_center = center
-                    last_score = score
-                    last_seen_ms = now_ms
-                    status = "BALL"
-                elif last_center is not None and time.ticks_diff(now_ms, last_seen_ms) <= TARGET_HOLD_MS:
-                    center = last_center
-                    score = last_score
-                    status = "HOLD"
+                if calib_mode:
+                    status = "CALIB"
+                    center = detected_center
+                    score = detected_score
+                else:
+                    if center is not None:
+                        last_center = center
+                        last_score = score
+                        last_seen_ms = now_ms
+                        status = "BALL"
+                    elif last_center is not None and time.ticks_diff(now_ms, last_seen_ms) <= TARGET_HOLD_MS:
+                        center = last_center
+                        score = last_score
+                        status = "HOLD"
 
-                found = center is not None
+                found = center is not None and not calib_mode
                 pos_cm = project_position_cm(center, calibration) if found else 0.0
+                overlay_pos_cm = project_position_cm(center, calibration) if center is not None else 0.0
 
                 detector.draw_result(result, pipeline.osd_img)
-                draw_overlay(pipeline.osd_img, center, pos_cm, TARGET_CM, score, status, calibration, active_roi)
+                draw_overlay(pipeline.osd_img, center, overlay_pos_cm, TARGET_CM, score, status, calibration, active_roi)
                 pipeline.osd_img.draw_string_advanced(5, 106, 16, net_status, color=(255, 255, 255))
+                draw_touch_ui(pipeline.osd_img, display_size, touch is not None, calib_mode, calib_step, calib_msg)
                 pipeline.show_image()
 
                 line = send_position(uart, found, pos_cm, TARGET_CM, score, status)
@@ -454,6 +646,11 @@ def main():
                 print("[h_position_rtsp] pipeline cleanup error:", cleanup_error)
         if uart is not None and hasattr(uart, "deinit"):
             uart.deinit()
+        if touch is not None and hasattr(touch, "deinit"):
+            try:
+                touch.deinit()
+            except BaseException as cleanup_error:
+                print("[h_position_rtsp] touch cleanup error:", cleanup_error)
         ap = None
         gc.collect()
 
