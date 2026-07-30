@@ -54,6 +54,7 @@ MAX_BOXES = 50
 ZERO_PX = (404, 242)
 MINUS_5CM_PX = (258,236)
 PLUS_5CM_PX = (554,238)
+DEFAULT_ZERO_PX = (400, 240)
 HALF_RANGE_CM = 5
 
 TARGET_CM = 0.0
@@ -201,10 +202,10 @@ def format_calibration_text(zero_px, minus_px, plus_px, half_range_cm):
 
 def default_calibration_points(display_size=None):
     if display_size is None:
-        return ZERO_PX, MINUS_5CM_PX, PLUS_5CM_PX, HALF_RANGE_CM
+        return DEFAULT_ZERO_PX, MINUS_5CM_PX, PLUS_5CM_PX, HALF_RANGE_CM
 
-    center_x = int(display_size[0]) // 2
-    center_y = int(display_size[1]) // 2
+    center_x = int(DEFAULT_ZERO_PX[0])
+    center_y = int(DEFAULT_ZERO_PX[1])
     half_span_px = int(round(abs(float(PLUS_5CM_PX[0]) - float(MINUS_5CM_PX[0])) / 2.0))
     return (
         (center_x, center_y),
@@ -445,7 +446,7 @@ def run_self_test():
     calibration = make_calibration((320, 180), (80, 180), (560, 180), 12.0)
     assert make_active_roi((640, 360)) == (0, 120, 640, 120)
     assert default_calibration_points((800, 480))[0] == (400, 240)
-    assert default_calibration_points((640, 360))[0] == (320, 180)
+    assert default_calibration_points((640, 360))[0] == (400, 240)
     text = format_calibration_text((320, 180), (220, 180), (420, 180), 5.0)
     zero_px, minus_px, plus_px, half_range_cm = parse_calibration_text(text)
     calibration_5cm = make_calibration(zero_px, minus_px, plus_px, half_range_cm)
