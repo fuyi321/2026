@@ -199,11 +199,22 @@ def format_calibration_text(zero_px, minus_px, plus_px, half_range_cm):
     )
 
 
-def default_calibration_points():
-    return ZERO_PX, MINUS_5CM_PX, PLUS_5CM_PX, HALF_RANGE_CM
+def default_calibration_points(display_size=None):
+    if display_size is None:
+        return ZERO_PX, MINUS_5CM_PX, PLUS_5CM_PX, HALF_RANGE_CM
+
+    center_x = int(display_size[0]) // 2
+    center_y = int(display_size[1]) // 2
+    half_span_px = int(round(abs(float(PLUS_5CM_PX[0]) - float(MINUS_5CM_PX[0])) / 2.0))
+    return (
+        (center_x, center_y),
+        (center_x - half_span_px, center_y),
+        (center_x + half_span_px, center_y),
+        HALF_RANGE_CM,
+    )
 
 
-def load_calibration_points():
+def load_calibration_points(default_points=None):
     try:
         with open(CALIB_FILE_PATH, "r") as calib_file:
             points = parse_calibration_text(calib_file.read())
@@ -214,7 +225,7 @@ def load_calibration_points():
         log("[h_position_rtsp] calibration default")
     except BaseException as error:
         log("[h_position_rtsp] calibration ignored:", error)
-    return default_calibration_points()
+    return default_points if default_points is not None else default_calibration_points()
 
 
 def save_calibration_points(zero_px, minus_px, plus_px, half_range_cm):
@@ -433,6 +444,8 @@ def draw_overlay(osd_image, center, pos_cm, target_cm, score, status, calibratio
 def run_self_test():
     calibration = make_calibration((320, 180), (80, 180), (560, 180), 12.0)
     assert make_active_roi((640, 360)) == (0, 120, 640, 120)
+    assert default_calibration_points((800, 480))[0] == (400, 240)
+    assert default_calibration_points((640, 360))[0] == (320, 180)
     text = format_calibration_text((320, 180), (220, 180), (420, 180), 5.0)
     zero_px, minus_px, plus_px, half_range_cm = parse_calibration_text(text)
     calibration_5cm = make_calibration(zero_px, minus_px, plus_px, half_range_cm)
@@ -465,8 +478,7 @@ def main():
     rtsp_url = None
     net_status = "AP: waiting"
     last_client_status = 0
-    zero_px, minus_px, plus_px, half_range_cm = load_calibration_points()
-    calibration = make_calibration(zero_px, minus_px, plus_px, half_range_cm)
+    calibration = None
 
     try:
         log("[h_position_rtsp] boot:", SCRIPT_VERSION)
@@ -486,6 +498,9 @@ def main():
         )
         display_size = pipeline.get_display_size()
         active_roi = make_active_roi(display_size)
+        zero_px, minus_px, plus_px, half_range_cm = load_calibration_points(default_calibration_points(display_size))
+        calibration = make_calibration(zero_px, minus_px, plus_px, half_range_cm)
+        log("[h_position_rtsp] zero: x=%d y=%d" % (int(zero_px[0]), int(zero_px[1])))
         log("[h_position_rtsp] roi: x=%d y=%d w=%d h=%d" % active_roi)
 
         detector = YOLOv8(
